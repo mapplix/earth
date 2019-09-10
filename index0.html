@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Malibu</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width">
+		<style>
+html, body {
+	margin: 0px;
+	background: linear-gradient(to bottom, #512C8A, #962264);
+	width: 100%; height: 100%;
+}
+
+a {
+	color:#0078ff;
+}
+#earth {
+	position: fixed;
+	width: 100%; height:100%
+}
+		</style>
+	</head>
+	<body>
+		<canvas id="earth"></canvas>
+		<script src="three.js"></script>
+		<script>
+
+//(function(){
+	var AMOUNT=200, d=25, R=200, adjustment=true, adaptive=true,
+		obliquity=23/180*3.14, roV1=.0022, roV2=-.0005, ro1=0, ro2=0,
+		canvas='#earth', color='#420236', fogC='#722779', T_earth='earth.jpg',
+		T_particle='data:image/gif;base64,R0lGODlhIAAgAIAAAP///wAAACH5BAEAAAEALAAAAAAgACAAQAJKjI8By51vmpyUqoqzi7oz6GVJSC5X6YEoAD1ry60TImtnjddxvh08C6PZgq0QUSiD/YDIX3O5W0qnVNRteoVGeS6nSncsHZWScQEAOw==';
+
+	var camera, scene, renderer;
+
+	var positions=[], particles, particle, count = 0, dpr, lastW,
+	W=window.innerWidth, H=window.innerHeight, aspect=W / H;
+
+	var mouseX = 0, mouseY = 0, x0, y0;
+	var lookAt=new THREE.Vector3(0, 0, 0), canvas=document.querySelector(canvas); 
+
+	renderer = new THREE.WebGLRenderer({alpha:true, antialias:true, canvas: canvas});//
+	renderer.setSize( W, H );
+	//renderer.context.getExtension('OES_standard_derivatives');
+	camera = new THREE.PerspectiveCamera( 18, aspect, 1, 10000 );
+	scene = new THREE.Scene();
+	var Pmap = (new THREE.TextureLoader()).load( T_particle );
+	var Emap = (new THREE.TextureLoader()).load( T_earth );
+	var Pmaterial = new THREE.PointsMaterial({size: d, transparent: true, map: Pmap});//, opacity: 0
+	var Wmaterial = new THREE.MeshStandardMaterial({
+		onBeforeCompile: function(sh){
+			sh.vertexShader='\
+#define MYSHADER\n\
+attribute float center;\n\
+varying vec3 vCenter, vPos, vV0, vV1, vV2;\n\
+'			+sh.vertexShader.replace(/}\s*$/, '\
+	int c=int(center);\n\
+	vCenter = vec3(c==0, c==1, c==2);\n\
+	vPos=position;\n\
+	gl_Position = projectionMatrix * modelViewMatrix * vec4(vPos, 1);\n\
+	vV0=vCenter[0]*vPos;\n\
+	vV1=vCenter[1]*vPos;\n\
+	vV2=vCenter[2]*vPos;\n\
+}\			');
+			sh.fragmentShader='\
+#define MYSHADER\n\
+varying vec3 vCenter, vPos, vV0, vV1, vV2;\n\
+'			+sh.fragmentShader.replace('#include <alphamap_fragment>', '\
+	#include <alphamap_fragment>\n\
+	vec3 d = fwidth( vCenter );\n\
+	vec3 a3 = smoothstep( vec3(0.01), d * 1.6, vCenter+0.5*d );\n\
+	float scale = dot(normalize(vViewPosition), vNormal);\n\
+	scale = 1.0-scale*scale;\n\
+	float dist = distance(vPos, vV0.xyz/vCenter.x);\n\
+	dist = min(dist, distance(vPos, vV1.xyz/vCenter.y));\n\
+	dist = min(dist, distance(vPos, vV2.xyz/vCenter.z));\n\
+	float b3 = smoothstep(2.0, 3.0, dist-1.5*scale*scale );\n\
+	float edgeFactorTri=min(b3,min( min( a3.x, a3.y ), a3.z ));\n\
+	diffuseColor.a *= mix( 1.0,  0.0, edgeFactorTri );\n\
+	float dissipation='+(posZ+.5*R+.01)+';\n\
+	diffuseColor.a *= smoothstep( 20.0,  0.0, fogDepth-dissipation );\n\
+\			').replace('	#include <fog_fragment>', '\
+	gl_FragColor.rgb = mix( gl_FragColor.rgb, vec3(1.0), pow(length(vCenter),6.0) );\n\
+	#include <fog_fragment>\
+\			');
+			console.log(sh, sh.vertexShader, sh.fragmentShader);
+		},
+		roughness: .69,
+		metalness: .86,
+		emissive: 0x010101,
+		transparent: true, alphaTest: 0.05
+	});//, opacity: 0
+	Pmaterial.color.set(color)
+	Wmaterial.color.set(fogC);
+	Wmaterial.side=2;
+	Wmaterial.extensions={derivatives: 1};
+	var geometry = new THREE.IcosahedronGeometry(R,2);
+
+	for ( var i = 0; i < geometry.vertices.length; i ++ ) {
+		geometry.vertices[i].applyEuler(new THREE.Euler(Math.random()*.16,Math.random()*.16,Math.random()*.16))
+	}
+	var bGeometry=(new THREE.BufferGeometry).fromGeometry(geometry);
+	var position = bGeometry.attributes.position;
+	var centers = new Int8Array( position.count );
+	var siblings = [], vCount=geometry.vertices.length
+
+	for ( var i = 0, l = position.count; i < l; i ++ ) {
+		var c =centers[i]= i % 3, j=(i-c)/3;
+		if (i<vCount) siblings[i]=[];//{count: 0};
+	}
+	function addSiblings(a,b,one){
+		if (!siblings[a][b]) siblings[a][b]=siblings[b]//, siblings[a].count++;
+		if (!one) addSiblings(b,a,1)
+	}
+	geometry.faces.forEach(function(face, i){
+		addSiblings(face.a,face.b);
+		addSiblings(face.a,face.c);
+		addSiblings(face.c,face.b);
+	})
+	
+	bGeometry.addAttribute( 'center', new THREE.BufferAttribute( centers, 1 ) );
+
+	var Ematerial = Wmaterial.clone();
+	Ematerial.alphaMap=Emap; Ematerial.alphaTest=.42; Ematerial.side=0;
+	var Earth = new THREE.Mesh(new THREE.IcosahedronGeometry(R*.77, 3), Ematerial)
+	var wGeometry=geometry.clone();
+	particles = new THREE.Group();
+	particles.add(new THREE.Mesh(bGeometry, Wmaterial), Earth);//new THREE.Points(geometry, Pmaterial), 
+	//particles.rotation.order='YXZ'
+	scene.add(particles);
+	// POSITIONS :
+	var posZ = 1700; //distance to camera
+	//scene.position.set(-12,54,0);
+
+	//camera.position.y=camera.position.z=2000
+
+	scene.fog=new THREE.Fog(fogC, posZ-R/2, posZ+R);
+	light=new THREE.PointLight();
+	hLight=new THREE.HemisphereLight('#fff', 0, 4)
+	dLight=new THREE.DirectionalLight('#fff', .5)
+	light.position.set(0,0,R*1.5);
+	scene.add(dLight, hLight);
+	hLight.position.set(0,0,1)
+	dLight.position.set(0,0,1)
+
+	if (adjustment) {
+		var q1 = new THREE.Quaternion(), q2 = new THREE.Quaternion(), active;
+		window.getWpos=function(){
+			return [scene.position, scene.rotation, camera]
+		}
+		canvas.onmousedown=function(e){
+			active=this.style.outline='1px solid'
+			x0=e.clientX;
+			y0=e.clientY;
+		}
+		onmousemove=function(e){
+			if (!active) return
+			var dX=x0-(x0=e.clientX), dY=y0-(y0=e.clientY);
+			if (e.shiftKey) {
+				scene.position.x-=dX;
+				scene.position.y+=dY;
+				return
+			}
+			q1.setFromEuler(scene.rotation)
+			q2.setFromEuler(new THREE.Euler(-dY*.003,-dX*.003,0))
+			scene.rotation.setFromQuaternion ( q2.multiply ( q1 ))
+		}
+		onmouseup=function(e){canvas.style.outline=active=''}
+	}
+
+	(function animate() {
+		requestAnimationFrame( animate );
+		var pos=canvas.getBoundingClientRect(), dY=window.innerHeight-document.documentElement.getBoundingClientRect().bottom;
+		if (pos.bottom<=0 || pos.top>=window.innerHeight) return;
+		if (dpr!=(dpr=window.devicePixelRatio) || W!=(W=window.innerWidth) || H!=(H=window.innerHeight)) {
+			renderer.setSize(W, H)
+			renderer.setPixelRatio( dpr );
+			camera.aspect=W/H;
+			camera.updateProjectionMatrix();
+		}
+		//camera.position.y += (-45-dY*.5 - camera.position.y ) * .08;
+		var z=camera.position.z += (posZ - camera.position.z ) * .085;
+		scene.fog.near=z-R/3; scene.fog.far=z+R*.65;
+		//material.opacity+=(1-material.opacity)*.05
+		camera.lookAt( lookAt );
+		ro1+=roV1; ro2+=roV2;
+		particles.rotation.set(0,0,0);
+		particles.rotateY(ro2).rotateX(obliquity).rotateY(ro1);
+		particles.rotation.y-=.0009
+		//particles.rotation.z+=.0011
+
+		// var i = 0, hx, hy=[];
+
+		// for ( var ix = 0; ix < AMOUNTX; ix ++ ) {
+		// }
+		// if (adjustment) {
+		// }
+		// positions.needsUpdate=true;
+		renderer.render( scene, camera );
+		count += 0.08;
+	})()
+//})()
+</script>
+	</body>
+</html>
